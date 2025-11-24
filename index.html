@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flappy Bird - Pixel Edition</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="game-container">
+        <canvas id="gameCanvas"></canvas>
+        <div id="startScreen" class="screen">
+            <h1>FLAPPY BIRD</h1>
+            <p>Click or Press SPACE to Start</p>
+            <div class="instructions">
+                <p>🎮 Controls:</p>
+                <p>SPACE / CLICK - Flap</p>
+            </div>
+        </div>
+        <div id="gameOverScreen" class="screen hidden">
+            <h1>GAME OVER</h1>
+            <p>Score: <span id="finalScore">0</span></p>
+            <p>Best: <span id="bestScore">0</span></p>
+            <p class="restart">Click or Press SPACE to Restart</p>
+        </div>
+        <div id="score" class="hidden">0</div>
+    </div>
+    <script src="game.js"></script>
+</body>
+
+</html>
