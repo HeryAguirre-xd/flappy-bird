@@ -2,24 +2,72 @@
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
+// Game Configuration - All tunable values in one place
+const CONFIG = {
+    canvas: {
+        width: 400,
+        height: 600
+    },
+    bird: {
+        x: 80,
+        width: 34,
+        height: 24,
+        gravity: 0.6,
+        jumpStrength: -10,
+        maxVelocity: 12,
+        terminalVelocity: 10,
+        hitboxPadding: 5  // Pixels to reduce from collision box for forgiveness
+    },
+    pipe: {
+        width: 60,
+        gap: 150,
+        minHeight: 50,
+        baseSpeed: 2.5,
+        spawnInterval: 120  // frames
+    },
+    ground: {
+        height: 100,
+        scrollSpeed: 2.5
+    },
+    physics: {
+        targetFPS: 60,
+        rotationEasing: 0.15
+    },
+    difficulty: {
+        enabled: true,
+        speedIncreasePerScore: 0.05,
+        maxSpeedMultiplier: 1.8,
+        gapDecreasePerScore: 2,
+        minGap: 120
+    },
+    debug: {
+        showHitboxes: false  // Set to true to visualize collision boxes
+    }
+};
+
 // Set canvas size
-canvas.width = 400;
-canvas.height = 600;
+canvas.width = CONFIG.canvas.width;
+canvas.height = CONFIG.canvas.height;
 
 // Game States
 const GameState = {
     START: 'start',
     PLAYING: 'playing',
+    PAUSED: 'paused',
     GAME_OVER: 'gameOver'
 };
 
 // Game Variables
 let gameState = GameState.START;
 let score = 0;
-let bestScore = localStorage.getItem('bestScore') || 0;
+let bestScore = parseInt(localStorage.getItem('bestScore')) || 0;
 let frame = 0;
 let particles = [];
 let groundOffset = 0;
+let lastFrameTime = performance.now();
+let deltaTime = 0;
+let difficultyMultiplier = 1;
+let currentPipeGap = CONFIG.pipe.gap;
 
 // Particle System
 class Particle {
@@ -35,11 +83,12 @@ class Particle {
         this.color = color || '#FFD700';
     }
 
-    update() {
-        this.vy += this.gravity;
-        this.x += this.vx;
-        this.y += this.vy;
-        this.life -= this.decay;
+    update(dt) {
+        const normalizedDt = dt / (1000 / CONFIG.physics.targetFPS);
+        this.vy += this.gravity * normalizedDt;
+        this.x += this.vx * normalizedDt;
+        this.y += this.vy * normalizedDt;
+        this.life -= this.decay * normalizedDt;
     }
 
     draw() {
@@ -57,17 +106,17 @@ class Particle {
 
 // Bird Object with improved physics
 const bird = {
-    x: 80,
+    x: CONFIG.bird.x,
     y: canvas.height / 2,
-    width: 34,
-    height: 24,
+    width: CONFIG.bird.width,
+    height: CONFIG.bird.height,
     velocity: 0,
-    gravity: 0.6,
-    jumpStrength: -10,
+    gravity: CONFIG.bird.gravity,
+    jumpStrength: CONFIG.bird.jumpStrength,
     rotation: 0,
     wingFrame: 0,
-    maxVelocity: 12,
-    terminalVelocity: 10,
+    maxVelocity: CONFIG.bird.maxVelocity,
+    terminalVelocity: CONFIG.bird.terminalVelocity,
 
     jump() {
         this.velocity = this.jumpStrength;
@@ -77,23 +126,24 @@ const bird = {
         }
     },
 
-    update() {
-        // Apply gravity with terminal velocity
-        this.velocity += this.gravity;
+    update(dt) {
+        // Apply gravity with terminal velocity (frame rate independent)
+        const normalizedDt = dt / (1000 / CONFIG.physics.targetFPS);
+        this.velocity += this.gravity * normalizedDt;
         this.velocity = Math.min(this.velocity, this.terminalVelocity);
 
-        this.y += this.velocity;
+        this.y += this.velocity * normalizedDt;
 
         // Smooth rotation based on velocity with easing
         const targetRotation = Math.min(Math.max(this.velocity * 4, -30), 90);
-        this.rotation += (targetRotation - this.rotation) * 0.15;
+        this.rotation += (targetRotation - this.rotation) * CONFIG.physics.rotationEasing;
 
-        // Wing animation
-        this.wingFrame = (this.wingFrame + 0.2) % 3;
+        // Wing animation (frame rate independent)
+        this.wingFrame = (this.wingFrame + 0.2 * normalizedDt) % 3;
 
         // Ground and ceiling collision with bounce effect
-        if (this.y + this.height > canvas.height - 100) {
-            this.y = canvas.height - 100 - this.height;
+        if (this.y + this.height > canvas.height - CONFIG.ground.height) {
+            this.y = canvas.height - CONFIG.ground.height - this.height;
             this.velocity = 0;
             if (gameState === GameState.PLAYING) {
                 // Create impact particles
@@ -125,6 +175,18 @@ const bird = {
         drawPixelBird(ctx, -this.width / 2, -this.height / 2, Math.floor(this.wingFrame));
 
         ctx.restore();
+
+        // Debug: Draw hitbox
+        if (CONFIG.debug.showHitboxes) {
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(
+                this.x + CONFIG.bird.hitboxPadding,
+                this.y + CONFIG.bird.hitboxPadding,
+                this.width - CONFIG.bird.hitboxPadding * 2,
+                this.height - CONFIG.bird.hitboxPadding * 2
+            );
+        }
     },
 
     reset() {
@@ -139,27 +201,29 @@ const bird = {
 class Pipe {
     constructor() {
         this.x = canvas.width;
-        this.width = 60;
-        this.gap = 150;
-        this.minHeight = 50;
-        this.maxHeight = canvas.height - this.gap - 150;
+        this.width = CONFIG.pipe.width;
+        this.gap = currentPipeGap;
+        this.minHeight = CONFIG.pipe.minHeight;
+        this.maxHeight = canvas.height - this.gap - CONFIG.ground.height - 50;
         this.topHeight = Math.random() * (this.maxHeight - this.minHeight) + this.minHeight;
         this.scored = false;
-        this.speed = 2.5;
+        this.speed = CONFIG.pipe.baseSpeed * difficultyMultiplier;
         this.highlightOffset = 0;
     }
 
-    update() {
-        this.x -= this.speed;
-        this.highlightOffset = (this.highlightOffset + 0.5) % 20;
+    update(dt) {
+        const normalizedDt = dt / (1000 / CONFIG.physics.targetFPS);
+        this.x -= this.speed * normalizedDt;
+        this.highlightOffset = (this.highlightOffset + 0.5 * normalizedDt) % 20;
 
         // Check if bird passed pipe
         if (!this.scored && this.x + this.width < bird.x) {
             this.scored = true;
             score++;
             updateScore();
-            // Score particles
-            for (let i = 0; i < 8; i++) {
+            updateDifficulty();
+            // Score particles with visual feedback
+            for (let i = 0; i < 15; i++) {
                 particles.push(new Particle(bird.x + bird.width, bird.y + bird.height / 2, '#FFD700'));
             }
         }
@@ -171,14 +235,24 @@ class Pipe {
 
         // Bottom pipe
         const bottomY = this.topHeight + this.gap;
-        drawPipe(ctx, this.x, bottomY, this.width, canvas.height - bottomY - 100, this.highlightOffset);
+        drawPipe(ctx, this.x, bottomY, this.width, canvas.height - bottomY - CONFIG.ground.height, this.highlightOffset);
+
+        // Debug: Draw hitbox
+        if (CONFIG.debug.showHitboxes) {
+            ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(this.x, 0, this.width, this.topHeight);
+            ctx.strokeRect(this.x, bottomY, this.width, canvas.height - bottomY - CONFIG.ground.height);
+        }
     }
 
     collidesWith(bird) {
-        const birdLeft = bird.x + 5;
-        const birdRight = bird.x + bird.width - 5;
-        const birdTop = bird.y + 5;
-        const birdBottom = bird.y + bird.height - 5;
+        // Apply hitbox padding for more forgiving collision
+        const padding = CONFIG.bird.hitboxPadding;
+        const birdLeft = bird.x + padding;
+        const birdRight = bird.x + bird.width - padding;
+        const birdTop = bird.y + padding;
+        const birdBottom = bird.y + bird.height - padding;
 
         if (birdRight > this.x && birdLeft < this.x + this.width) {
             if (birdTop < this.topHeight || birdBottom > this.topHeight + this.gap) {
@@ -195,7 +269,6 @@ class Pipe {
 
 // Pipes Array
 let pipes = [];
-const pipeInterval = 120; // frames between pipes
 
 // Cloud Object for parallax background
 class Cloud {
@@ -208,8 +281,9 @@ class Cloud {
         this.opacity = 0.3 + (0.3 * layer);
     }
 
-    update() {
-        this.x -= this.speed;
+    update(dt) {
+        const normalizedDt = dt / (1000 / CONFIG.physics.targetFPS);
+        this.x -= this.speed * normalizedDt;
         if (this.x + this.size * 2 < 0) {
             this.x = canvas.width + this.size;
             this.y = Math.random() * (canvas.height - 200);
@@ -235,8 +309,9 @@ class Mountain {
         this.color = layer === 1 ? 'rgba(76, 150, 76, 0.3)' : 'rgba(102, 178, 102, 0.5)';
     }
 
-    update() {
-        this.offset = (this.offset + this.speed) % canvas.width;
+    update(dt) {
+        const normalizedDt = dt / (1000 / CONFIG.physics.targetFPS);
+        this.offset = (this.offset + this.speed * normalizedDt) % canvas.width;
     }
 
     draw() {
@@ -244,10 +319,10 @@ class Mountain {
         ctx.beginPath();
         for (let x = -this.offset; x < canvas.width + 100; x += 80) {
             const height = 100 + Math.sin(x * 0.01) * 30;
-            ctx.lineTo(x, canvas.height - 100 - height / this.layer);
+            ctx.lineTo(x, canvas.height - CONFIG.ground.height - height / this.layer);
         }
-        ctx.lineTo(canvas.width, canvas.height - 100);
-        ctx.lineTo(-this.offset, canvas.height - 100);
+        ctx.lineTo(canvas.width, canvas.height - CONFIG.ground.height);
+        ctx.lineTo(-this.offset, canvas.height - CONFIG.ground.height);
         ctx.closePath();
         ctx.fill();
     }
@@ -380,58 +455,59 @@ function drawPipe(ctx, x, y, width, height, highlightOffset) {
 
 function drawGround() {
     // Ground shadow
-    const shadowGradient = ctx.createLinearGradient(0, canvas.height - 105, 0, canvas.height - 100);
+    const groundY = canvas.height - CONFIG.ground.height;
+    const shadowGradient = ctx.createLinearGradient(0, groundY - 5, 0, groundY);
     shadowGradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
     shadowGradient.addColorStop(1, 'rgba(0, 0, 0, 0.3)');
     ctx.fillStyle = shadowGradient;
-    ctx.fillRect(0, canvas.height - 105, canvas.width, 5);
+    ctx.fillRect(0, groundY - 5, canvas.width, 5);
 
     // Ground base with gradient
-    const groundGradient = ctx.createLinearGradient(0, canvas.height - 100, 0, canvas.height);
+    const groundGradient = ctx.createLinearGradient(0, groundY, 0, canvas.height);
     groundGradient.addColorStop(0, '#CD853F');
     groundGradient.addColorStop(0.3, '#DEB887');
     groundGradient.addColorStop(1, '#8B7355');
     ctx.fillStyle = groundGradient;
-    ctx.fillRect(0, canvas.height - 100, canvas.width, 100);
+    ctx.fillRect(0, groundY, canvas.width, CONFIG.ground.height);
 
     // Animated grass with parallax
     ctx.fillStyle = '#8BC34A';
-    ctx.fillRect(0, canvas.height - 100, canvas.width, 20);
+    ctx.fillRect(0, groundY, canvas.width, 20);
 
     // Grass blades
     ctx.fillStyle = '#6FA02F';
     for (let i = 0; i < canvas.width; i += 8) {
         const offset = gameState === GameState.PLAYING ? (groundOffset % 8) : 0;
-        ctx.fillRect(i - offset, canvas.height - 100, 2, 8);
-        ctx.fillRect(i + 4 - offset, canvas.height - 96, 2, 6);
+        ctx.fillRect(i - offset, groundY, 2, 8);
+        ctx.fillRect(i + 4 - offset, groundY + 4, 2, 6);
     }
 
     // Ground pattern with depth
     ctx.fillStyle = 'rgba(205, 133, 63, 0.6)';
     for (let i = 0; i < canvas.width; i += 40) {
         const offset = gameState === GameState.PLAYING ? (groundOffset % 40) : 0;
-        ctx.fillRect(i - offset, canvas.height - 80, 20, 8);
-        ctx.fillRect(i + 20 - offset, canvas.height - 60, 20, 8);
+        ctx.fillRect(i - offset, groundY + 20, 20, 8);
+        ctx.fillRect(i + 20 - offset, groundY + 40, 20, 8);
     }
 
     // Ground details
     ctx.fillStyle = 'rgba(139, 115, 85, 0.5)';
     for (let i = 0; i < canvas.width; i += 60) {
         const offset = gameState === GameState.PLAYING ? (groundOffset % 60) : 0;
-        ctx.fillRect(i + 10 - offset, canvas.height - 70, 8, 4);
-        ctx.fillRect(i + 35 - offset, canvas.height - 50, 6, 3);
+        ctx.fillRect(i + 10 - offset, groundY + 30, 8, 4);
+        ctx.fillRect(i + 35 - offset, groundY + 50, 6, 3);
     }
 }
 
 function drawBackground() {
     // Realistic sky gradient
-    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height - 100);
+    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height - CONFIG.ground.height);
     gradient.addColorStop(0, '#87CEEB');
     gradient.addColorStop(0.3, '#4EC0CA');
     gradient.addColorStop(0.7, '#7DD0D8');
     gradient.addColorStop(1, '#B8E6E8');
     ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, canvas.width, canvas.height - 100);
+    ctx.fillRect(0, 0, canvas.width, canvas.height - CONFIG.ground.height);
 
     // Sun
     const sunGradient = ctx.createRadialGradient(350, 80, 10, 350, 80, 40);
@@ -458,11 +534,43 @@ function startGame() {
     gameState = GameState.PLAYING;
     score = 0;
     pipes = [];
+    particles = [];  // Clear particles
+    frame = 0;
+    difficultyMultiplier = 1;
+    currentPipeGap = CONFIG.pipe.gap;
     bird.reset();
     document.getElementById('startScreen').classList.add('hidden');
     document.getElementById('gameOverScreen').classList.add('hidden');
+    document.getElementById('pauseScreen').classList.add('hidden');
     document.getElementById('score').classList.remove('hidden');
     updateScore();
+}
+
+function pauseGame() {
+    if (gameState === GameState.PLAYING) {
+        gameState = GameState.PAUSED;
+        document.getElementById('pauseScreen').classList.remove('hidden');
+    } else if (gameState === GameState.PAUSED) {
+        gameState = GameState.PLAYING;
+        document.getElementById('pauseScreen').classList.add('hidden');
+        lastFrameTime = performance.now();  // Reset frame time to avoid time jump
+    }
+}
+
+function updateDifficulty() {
+    if (!CONFIG.difficulty.enabled) return;
+
+    // Gradually increase speed
+    difficultyMultiplier = Math.min(
+        1 + (score * CONFIG.difficulty.speedIncreasePerScore),
+        CONFIG.difficulty.maxSpeedMultiplier
+    );
+
+    // Gradually decrease gap (make it harder)
+    currentPipeGap = Math.max(
+        CONFIG.pipe.gap - (score * CONFIG.difficulty.gapDecreasePerScore),
+        CONFIG.difficulty.minGap
+    );
 }
 
 function gameOver() {
@@ -480,33 +588,49 @@ function gameOver() {
 }
 
 function updateScore() {
-    document.getElementById('score').textContent = score;
+    const scoreElement = document.getElementById('score');
+    scoreElement.textContent = score;
+
+    // Visual feedback: brief scale animation
+    scoreElement.style.transform = 'translateX(-50%) scale(1.3)';
+    setTimeout(() => {
+        scoreElement.style.transform = 'translateX(-50%) scale(1)';
+    }, 150);
 }
 
-// Game Loop
-function gameLoop() {
+// Game Loop with frame rate independence
+function gameLoop(currentTime) {
+    // Calculate delta time for frame rate independence
+    deltaTime = currentTime - lastFrameTime;
+    lastFrameTime = currentTime;
+
+    // Cap delta time to avoid large jumps (e.g., when tab is inactive)
+    deltaTime = Math.min(deltaTime, 100);
+
     // Clear canvas
     drawBackground();
 
-    // Update clouds and mountains
-    clouds.forEach(cloud => cloud.update());
-    mountains.forEach(mountain => mountain.update());
+    // Update clouds and mountains (always animate)
+    clouds.forEach(cloud => cloud.update(deltaTime));
+    mountains.forEach(mountain => mountain.update(deltaTime));
 
     if (gameState === GameState.PLAYING) {
         frame++;
-        groundOffset += 2.5;
+        const normalizedDt = deltaTime / (1000 / CONFIG.physics.targetFPS);
+        groundOffset += CONFIG.ground.scrollSpeed * normalizedDt;
 
         // Spawn pipes
-        if (frame % pipeInterval === 0) {
+        if (frame % CONFIG.pipe.spawnInterval === 0) {
             pipes.push(new Pipe());
         }
 
         // Update bird
-        bird.update();
+        bird.update(deltaTime);
 
         // Update and draw pipes
-        pipes.forEach((pipe, index) => {
-            pipe.update();
+        for (let i = pipes.length - 1; i >= 0; i--) {
+            const pipe = pipes[i];
+            pipe.update(deltaTime);
             pipe.draw();
 
             // Check collision
@@ -516,16 +640,22 @@ function gameLoop() {
 
             // Remove off-screen pipes
             if (pipe.x + pipe.width < 0) {
-                pipes.splice(index, 1);
+                pipes.splice(i, 1);
             }
-        });
+        }
 
-        // Update and draw particles
+        // Update and draw particles (limit particle count for performance)
+        if (particles.length > 200) {
+            particles = particles.slice(-100);  // Keep only recent particles
+        }
         particles = particles.filter(particle => {
-            particle.update();
+            particle.update(deltaTime);
             particle.draw();
             return !particle.isDead();
         });
+    } else if (gameState === GameState.PAUSED) {
+        // Draw pipes when paused
+        pipes.forEach(pipe => pipe.draw());
     }
 
     // Draw bird
@@ -538,7 +668,14 @@ function gameLoop() {
 }
 
 // Event Listeners
+let lastJumpTime = 0;
+const jumpCooldown = 100;  // ms to prevent spam clicking
+
 function handleJump() {
+    const now = performance.now();
+    if (now - lastJumpTime < jumpCooldown) return;
+    lastJumpTime = now;
+
     if (gameState === GameState.START) {
         startGame();
         bird.jump();
@@ -552,11 +689,26 @@ function handleJump() {
 // Mouse/Touch controls
 canvas.addEventListener('click', handleJump);
 
+// Touch controls for mobile
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    handleJump();
+}, { passive: false });
+
 // Keyboard controls
 document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
         e.preventDefault();
         handleJump();
+    } else if (e.code === 'Escape' || e.code === 'KeyP') {
+        e.preventDefault();
+        if (gameState === GameState.PLAYING || gameState === GameState.PAUSED) {
+            pauseGame();
+        }
+    } else if (e.code === 'KeyD' && (e.metaKey || e.ctrlKey)) {
+        // Debug mode toggle (Cmd/Ctrl + D)
+        e.preventDefault();
+        CONFIG.debug.showHitboxes = !CONFIG.debug.showHitboxes;
     }
 });
 

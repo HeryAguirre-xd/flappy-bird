@@ -98,6 +98,7 @@ body {
     text-shadow: 4px 4px 0 #222;
     z-index: 5;
     pointer-events: none;
+    transition: transform 0.15s ease-out;
 }
 
 /* Loading Google Font for retro look */
